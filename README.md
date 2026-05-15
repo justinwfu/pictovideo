@@ -1,15 +1,16 @@
 # pictovideo
 
-Drop in a photo. Get back a dark-themed HTML page of YouTube videos that match it from three different angles: literal, instructional, and broader-topical.
+Drop in a photo. Get back a dark-themed HTML page of YouTube videos that match it from three angles — literal, instructional, and broader-topical — with a one-sentence transcript summary and the top comment under every card.
 
-![pictovideo output: photo thumbnail at top, then sections for each generated query with embedded video cards](docs/screenshot.png)
+![pictovideo output: photo thumbnail at top, then sections for each generated query with embedded video cards showing transcript summaries and top comments](docs/screenshot.png)
 
 ```
 photo.jpg
-  -> Claude Haiku 4.5 (vision) -> 3 diverse search queries
-  -> youtube-pp-cli youtube search-bulk (single call)
-  -> Tailwind dark page with lite-embed thumbnails
-  -> opened in your browser
+  -> Claude Haiku 4.5 (vision)          -> 3 diverse search queries
+  -> youtube-pp-cli search-bulk         -> 15 top YouTube picks (5 per query)
+  -> videos-transcript + videos-comments (parallel, per pick)
+  -> Claude Haiku 4.5 (batched)         -> one-sentence summary per video
+  -> Tailwind dark page                 -> opened in your browser
 ```
 
 ## Prereqs
@@ -49,8 +50,8 @@ Photos larger than Anthropic's 5 MB image limit are auto-downscaled with `sharp`
 ## Tests
 
 ```bash
-npm test                  # 17 node:test cases, ~1s
-UPDATE_GOLDENS=1 npm test # regenerate tests/fixtures/golden.html after intentional render changes
+npm test                  # 21 node:test cases, ~1s
+UPDATE_GOLDENS=1 npm test # regenerate tests/fixtures/*.html after intentional render changes
 ```
 
 Per-feature acceptance criteria (automated + manual) live in `tests/acceptance.md`.
