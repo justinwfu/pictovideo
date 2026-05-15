@@ -74,9 +74,12 @@ async function downscaleToFit(bytes: Buffer, ext: string): Promise<Buffer> {
   // API reject if it's still too big — preserves user expectations for GIFs.
   if (ext === '.gif') return bytes;
 
+  // .rotate() with no args applies EXIF Orientation into the pixels — without
+  // this, iPhone photos taken in portrait come out sideways once sharp strips
+  // the EXIF tag.
   const originalKB = Math.round(bytes.length / 1024);
   for (const width of [2048, 1536, 1024, 768]) {
-    const out = await sharp(bytes).resize({ width, withoutEnlargement: true }).toBuffer();
+    const out = await sharp(bytes).rotate().resize({ width, withoutEnlargement: true }).toBuffer();
     if (out.length <= MAX_RAW_BYTES) {
       console.error(
         `Downscaled ${originalKB} KB → ${Math.round(out.length / 1024)} KB (width ${width}px) to fit Anthropic 5 MB limit`,
@@ -84,9 +87,7 @@ async function downscaleToFit(bytes: Buffer, ext: string): Promise<Buffer> {
       return out;
     }
   }
-  // Last resort: smallest pass anyway. The API call may still fail, but the
-  // caller will surface that error.
-  return sharp(bytes).resize({ width: 768, withoutEnlargement: true }).toBuffer();
+  return sharp(bytes).rotate().resize({ width: 768, withoutEnlargement: true }).toBuffer();
 }
 
 async function loadAndValidatePhoto(photoPath: string): Promise<{ bytes: Buffer; ext: string; mime: string }> {
