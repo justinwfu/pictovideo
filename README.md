@@ -38,6 +38,8 @@ Outputs `out/<timestamp>-pictovideo.html` and opens `out/latest.html` (symlink) 
 
 Supported formats: JPEG, PNG, WEBP, GIF. HEIC is rejected (iPhone users: re-export as JPEG).
 
+Photos larger than Anthropic's 5 MB image limit are auto-downscaled with `sharp` before being sent to Claude (tries widths 2048 → 1536 → 1024 → 768 and keeps the first that fits). EXIF orientation is baked into the pixels so portrait iPhone shots arrive upright. GIFs pass through untouched.
+
 ## Flags
 
 - `--no-cache` — bypass the local vision-response cache (useful when tweaking the system prompt)
