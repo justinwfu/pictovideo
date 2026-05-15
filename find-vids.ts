@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
 import { extname, basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -8,6 +9,8 @@ import { anthropic } from '@ai-sdk/anthropic';
 import { generateObject } from 'ai';
 import { z } from 'zod';
 import sharp from 'sharp';
+
+const execFile = promisify(execFileCb);
 
 const ALLOWED_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
 const EXT_TO_MIME: Record<string, string> = {
@@ -18,6 +21,8 @@ const EXT_TO_MIME: Record<string, string> = {
   '.gif': 'image/gif',
 };
 const VISION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const ENRICH_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const TRANSCRIPT_TRUNCATE_CHARS = 2000;
 
 // Anthropic rejects images whose base64 payload exceeds 5 MB. Base64 inflates
 // raw bytes by ~33%, so the safe raw ceiling is ~3.75 MB. Subtract a small
@@ -32,7 +37,9 @@ const SYSTEM_PROMPT = `You generate 3 YouTube search queries for a photo. Each q
 
 Each query: 3 to 7 words, plain language as a real YouTube user would type. No quotes, no "YouTube" in the query itself. Return them in the order above.`;
 
-export type Flags = { noCache: boolean; showQueries: boolean };
+export type Flags = { noCache: boolean; showQueries: boolean; noEnrich: boolean };
+
+export type TopComment = { text: string; author: string; likeCount: number };
 
 export type Video = {
   videoId: string;
@@ -44,19 +51,29 @@ export type Video = {
   embedUrl?: string;
   watchUrl?: string;
   description?: string;
+  summary?: string;
+  topComment?: TopComment;
 };
 
 export type TermGroup = { query: string; results: Video[]; error?: string };
 type BulkResponse = { terms: TermGroup[] };
 
+type CachedEnrichment = {
+  savedAt: number;
+  transcript: string;
+  topComment?: TopComment;
+  summary?: string;
+};
+
 export function parseArgs(argv: string[]): { photoPath: string; flags: Flags } {
-  const flags: Flags = { noCache: false, showQueries: false };
+  const flags: Flags = { noCache: false, showQueries: false, noEnrich: false };
   const positional: string[] = [];
   for (const a of argv) {
     if (a === '--no-cache') flags.noCache = true;
     else if (a === '--show-queries') flags.showQueries = true;
+    else if (a === '--no-enrich') flags.noEnrich = true;
     else if (a === '-h' || a === '--help') {
-      console.log('Usage: find-vids <photo> [--no-cache] [--show-queries]');
+      console.log('Usage: find-vids <photo> [--no-cache] [--show-queries] [--no-enrich]');
       process.exit(0);
     } else if (a.startsWith('--')) {
       console.error(`Unknown flag: ${a}`);
@@ -64,7 +81,7 @@ export function parseArgs(argv: string[]): { photoPath: string; flags: Flags } {
     } else positional.push(a);
   }
   if (positional.length !== 1) {
-    console.error('Usage: find-vids <photo> [--no-cache] [--show-queries]');
+    console.error('Usage: find-vids <photo> [--no-cache] [--show-queries] [--no-enrich]');
     process.exit(1);
   }
   return { photoPath: positional[0], flags };
@@ -184,6 +201,149 @@ function searchYouTube(queries: string[]): TermGroup[] {
   return parsed.terms ?? [];
 }
 
+async function fetchTranscript(cli: string, videoId: string): Promise<string> {
+  try {
+    const { stdout } = await execFile(cli, ['youtube', 'videos-transcript', videoId, '--agent'], {
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: 20_000,
+    });
+    const parsed = JSON.parse(stdout) as { text?: string };
+    return (parsed.text ?? '').slice(0, TRANSCRIPT_TRUNCATE_CHARS);
+  } catch {
+    // No captions, private video, or transient error — graceful empty.
+    return '';
+  }
+}
+
+async function fetchTopComment(cli: string, videoId: string): Promise<TopComment | undefined> {
+  try {
+    const { stdout } = await execFile(cli, ['youtube', 'videos-comments', videoId, '--top', '1', '--agent'], {
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 20_000,
+    });
+    const parsed = JSON.parse(stdout) as { comments?: Array<{ text?: string; author?: string; likeCount?: number }> };
+    const c = parsed.comments?.[0];
+    if (!c || !c.text) return undefined;
+    return { text: c.text, author: c.author ?? '', likeCount: c.likeCount ?? 0 };
+  } catch {
+    return undefined;
+  }
+}
+
+async function summarizeTranscripts(
+  videos: Array<{ videoId: string; title: string; transcript: string }>,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (videos.length === 0) return out;
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.error('ANTHROPIC_API_KEY missing; skipping transcript summaries.');
+    return out;
+  }
+
+  const { object } = await generateObject({
+    model: anthropic('claude-haiku-4-5'),
+    schema: z.object({
+      summaries: z.array(
+        z.object({
+          videoId: z.string(),
+          summary: z.string().min(1).describe('One sentence, max 25 words, grounded strictly in the transcript.'),
+        }),
+      ),
+    }),
+    system:
+      'For each video, write ONE sentence (max 25 words) describing what the video actually delivers, grounded strictly in the transcript. ' +
+      'Avoid clickbait phrasing and the channel name. If the transcript is too sparse to summarize, return the literal string "Transcript too sparse to summarize."',
+    messages: [
+      {
+        role: 'user',
+        content: 'Summarize each of these videos:\n\n' + JSON.stringify(videos, null, 2),
+      },
+    ],
+  });
+
+  for (const s of object.summaries) {
+    // Drop the "sparse transcript" sentinel so the renderer omits the summary
+    // block entirely rather than displaying an apology line.
+    if (s.summary.trim().toLowerCase().startsWith('transcript too sparse')) continue;
+    out.set(s.videoId, s.summary);
+  }
+  return out;
+}
+
+export async function enrichVideos(terms: TermGroup[], opts: { noCache: boolean } = { noCache: false }): Promise<TermGroup[]> {
+  const cli = process.env.YOUTUBE_PP_CLI || 'youtube-pp-cli';
+  const cacheDir = join('.cache', 'enrich');
+  await fs.mkdir(cacheDir, { recursive: true });
+
+  const allVideos: Video[] = terms.flatMap((t) => (t.error ? [] : t.results));
+  if (allVideos.length === 0) return terms;
+
+  // Phase 1: hydrate transcript + top-comment per video (cache or fetch in parallel).
+  const enrichments = await Promise.all(
+    allVideos.map(async (v): Promise<CachedEnrichment & { videoId: string }> => {
+      const cacheFile = join(cacheDir, `${v.videoId}.json`);
+      if (!opts.noCache) {
+        try {
+          const raw = await fs.readFile(cacheFile, 'utf-8');
+          const cached = JSON.parse(raw) as CachedEnrichment;
+          if (Date.now() - cached.savedAt < ENRICH_CACHE_TTL_MS) {
+            // Migrate older cache entries that stored the "too sparse"
+            // sentinel as a literal summary.
+            if (cached.summary && cached.summary.trim().toLowerCase().startsWith('transcript too sparse')) {
+              cached.summary = undefined;
+            }
+            return { videoId: v.videoId, ...cached };
+          }
+        } catch { /* miss */ }
+      }
+      const [transcript, topComment] = await Promise.all([
+        fetchTranscript(cli, v.videoId),
+        fetchTopComment(cli, v.videoId),
+      ]);
+      const entry: CachedEnrichment = { savedAt: Date.now(), transcript, topComment };
+      await fs.writeFile(cacheFile, JSON.stringify(entry, null, 2));
+      return { videoId: v.videoId, ...entry };
+    }),
+  );
+
+  // Phase 2: batch-summarize videos that have a transcript but no cached summary.
+  const titleById = new Map(allVideos.map((v) => [v.videoId, v.title]));
+  const needSummary = enrichments.filter((e) => !e.summary && e.transcript.length > 0);
+  if (needSummary.length > 0) {
+    const summaries = await summarizeTranscripts(
+      needSummary.map((e) => ({
+        videoId: e.videoId,
+        title: titleById.get(e.videoId) ?? '',
+        transcript: e.transcript,
+      })),
+    );
+    for (const e of enrichments) {
+      const s = summaries.get(e.videoId);
+      if (!s) continue;
+      e.summary = s;
+      const cacheFile = join(cacheDir, `${e.videoId}.json`);
+      const toWrite: CachedEnrichment = {
+        savedAt: e.savedAt,
+        transcript: e.transcript,
+        topComment: e.topComment,
+        summary: e.summary,
+      };
+      await fs.writeFile(cacheFile, JSON.stringify(toWrite, null, 2));
+    }
+  }
+
+  // Phase 3: attach enrichment back onto each Video.
+  const byId = new Map(enrichments.map((e) => [e.videoId, e]));
+  return terms.map((t) => ({
+    ...t,
+    results: t.results.map((v) => {
+      const e = byId.get(v.videoId);
+      if (!e) return v;
+      return { ...v, summary: e.summary, topComment: e.topComment };
+    }),
+  }));
+}
+
 export function esc(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -205,6 +365,15 @@ export function renderHTML(photoDataUrl: string, terms: TermGroup[]): string {
           const embedAutoplay = embed.includes('?')
             ? `${embed}&autoplay=1`
             : `${embed}?autoplay=1`;
+          const summaryBlock = v.summary
+            ? `\n          <p class="text-xs text-zinc-300 mt-2 italic line-clamp-3">${esc(v.summary)}</p>`
+            : '';
+          const commentBlock = v.topComment
+            ? `\n          <div class="mt-2 pt-2 border-t border-zinc-800">
+            <p class="text-[10px] text-zinc-500 uppercase tracking-wide">▲ ${v.topComment.likeCount} · ${esc(v.topComment.author)}</p>
+            <p class="text-xs text-zinc-400 line-clamp-2 mt-0.5">${esc(v.topComment.text)}</p>
+          </div>`
+            : '';
           return `<div class="group rounded-lg overflow-hidden bg-zinc-900 hover:bg-zinc-800 transition cursor-pointer" data-embed="${esc(embedAutoplay)}" data-vid="${esc(v.videoId)}">
         <div class="relative aspect-video bg-zinc-950">
           <img src="${esc(v.thumbnailUrl)}" alt="" class="w-full h-full object-cover" loading="lazy" />
@@ -216,7 +385,7 @@ export function renderHTML(photoDataUrl: string, terms: TermGroup[]): string {
         </div>
         <div class="p-3">
           <h3 class="text-sm font-medium text-zinc-100 line-clamp-2">${esc(v.title)}</h3>
-          <p class="text-xs text-zinc-400 mt-1">${esc(v.channelTitle)}</p>
+          <p class="text-xs text-zinc-400 mt-1">${esc(v.channelTitle)}</p>${summaryBlock}${commentBlock}
         </div>
       </div>`;
         })
@@ -239,6 +408,7 @@ export function renderHTML(photoDataUrl: string, terms: TermGroup[]): string {
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .line-clamp-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
     body { background: #09090b; }
   </style>
 </head>
@@ -308,7 +478,11 @@ async function main(): Promise<void> {
     for (const q of queries) console.error('  - ' + q);
   }
 
-  const terms = searchYouTube(queries);
+  let terms = searchYouTube(queries);
+
+  if (!flags.noEnrich) {
+    terms = await enrichVideos(terms, { noCache: flags.noCache });
+  }
 
   const photoDataUrl = `data:${mime};base64,${bytes.toString('base64')}`;
   const html = renderHTML(photoDataUrl, terms);

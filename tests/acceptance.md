@@ -5,7 +5,7 @@ Per-feature checklists used by both the automated test suite and manual smoke te
 ## CLI argument parsing — `parseArgs`
 
 - [x] Returns `{ photoPath, flags }` when given a single positional photo path.
-- [x] Accepts `--no-cache` and `--show-queries` in any order.
+- [x] Accepts `--no-cache`, `--show-queries`, and `--no-enrich` in any order.
 - [x] Exits non-zero on unknown flags (`--bogus`).
 - [x] Exits non-zero when no photo path is given.
 
@@ -41,6 +41,17 @@ Per-feature checklists used by both the automated test suite and manual smoke te
 - [x] Header reports `N queries, M videos` where M sums result counts across non-erroring terms.
 - [x] Error terms render an inline error block, not video cards.
 - [x] All user-supplied strings are HTML-escaped via `esc` (covered by `esc` unit tests).
+
+## Per-video enrichment — `enrichVideos`
+
+- [ ] Transcript fetched via `youtube-pp-cli youtube videos-transcript <id>`; missing captions degrade silently to no summary. (manual)
+- [ ] Top comment fetched via `youtube-pp-cli youtube videos-comments <id> --top 1`; comments-disabled videos degrade silently. (manual)
+- [ ] A single batched Claude call summarizes all videos with non-empty transcripts in one round-trip.
+- [ ] Summaries are one sentence (≤ 25 words), transcript-grounded, and do not parrot the title.
+- [ ] The "Transcript too sparse to summarize" sentinel from Claude is filtered out — no apology line ever renders. (covered: summarizer + cache-read filters)
+- [x] `--no-enrich` skips enrichment entirely and reproduces the pre-feature page.
+- [ ] Per-`videoId` cache at `.cache/enrich/<id>.json` with a 7-day TTL; second run on the same videos triggers zero extra CLI/Claude calls. (manual)
+- [x] Card layout shows the summary in italic + a top-comment block (likeCount · author · text) when present, and nothing when absent.
 
 ## Cross-platform open — `resolveOpenCommand` / `openInBrowser`
 
