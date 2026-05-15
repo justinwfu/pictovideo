@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { extname, basename, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { anthropic } from '@ai-sdk/anthropic';
 import { generateObject } from 'ai';
@@ -21,7 +22,7 @@ const VISION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 // Anthropic rejects images whose base64 payload exceeds 5 MB. Base64 inflates
 // raw bytes by ~33%, so the safe raw ceiling is ~3.75 MB. Subtract a small
 // buffer to leave room for the JSON envelope around the payload.
-const MAX_RAW_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4) - 8 * 1024;
+export const MAX_RAW_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4) - 8 * 1024;
 
 const SYSTEM_PROMPT = `You generate 3 YouTube search queries for a photo. Each query MUST target a different intent — the queries are not synonyms of each other.
 
@@ -31,9 +32,9 @@ const SYSTEM_PROMPT = `You generate 3 YouTube search queries for a photo. Each q
 
 Each query: 3 to 7 words, plain language as a real YouTube user would type. No quotes, no "YouTube" in the query itself. Return them in the order above.`;
 
-type Flags = { noCache: boolean; showQueries: boolean };
+export type Flags = { noCache: boolean; showQueries: boolean };
 
-type Video = {
+export type Video = {
   videoId: string;
   title: string;
   channelTitle: string;
@@ -45,10 +46,10 @@ type Video = {
   description?: string;
 };
 
-type TermGroup = { query: string; results: Video[]; error?: string };
+export type TermGroup = { query: string; results: Video[]; error?: string };
 type BulkResponse = { terms: TermGroup[] };
 
-function parseArgs(argv: string[]): { photoPath: string; flags: Flags } {
+export function parseArgs(argv: string[]): { photoPath: string; flags: Flags } {
   const flags: Flags = { noCache: false, showQueries: false };
   const positional: string[] = [];
   for (const a of argv) {
@@ -69,7 +70,7 @@ function parseArgs(argv: string[]): { photoPath: string; flags: Flags } {
   return { photoPath: positional[0], flags };
 }
 
-async function downscaleToFit(bytes: Buffer, ext: string): Promise<Buffer> {
+export async function downscaleToFit(bytes: Buffer, ext: string): Promise<Buffer> {
   // GIFs may be animated; sharp would flatten them. Pass through and let the
   // API reject if it's still too big — preserves user expectations for GIFs.
   if (ext === '.gif') return bytes;
@@ -90,7 +91,7 @@ async function downscaleToFit(bytes: Buffer, ext: string): Promise<Buffer> {
   return sharp(bytes).rotate().resize({ width: 768, withoutEnlargement: true }).toBuffer();
 }
 
-async function loadAndValidatePhoto(photoPath: string): Promise<{ bytes: Buffer; ext: string; mime: string }> {
+export async function loadAndValidatePhoto(photoPath: string): Promise<{ bytes: Buffer; ext: string; mime: string }> {
   const ext = extname(photoPath).toLowerCase();
   if (!ALLOWED_EXT.has(ext)) {
     console.error(`Unsupported format: ${ext || '(none)'}.`);
@@ -104,8 +105,15 @@ async function loadAndValidatePhoto(photoPath: string): Promise<{ bytes: Buffer;
     console.error(`Cannot read photo: ${(e as Error).message}`);
     process.exit(1);
   }
-  if (bytes.length > MAX_RAW_BYTES) {
+  if (ext === '.gif') {
+    // GIFs may be animated; pass through so we don't flatten frames.
+  } else if (bytes.length > MAX_RAW_BYTES) {
     bytes = await downscaleToFit(bytes, ext);
+  } else {
+    // Normalize EXIF orientation for all under-limit inputs too — otherwise
+    // portrait iPhone JPEGs under the size cap arrive sideways when the API
+    // doesn't honor EXIF.
+    bytes = await sharp(bytes).rotate().toBuffer();
   }
   return { bytes, ext, mime: EXT_TO_MIME[ext] };
 }
@@ -176,7 +184,7 @@ function searchYouTube(queries: string[]): TermGroup[] {
   return parsed.terms ?? [];
 }
 
-function esc(s: string): string {
+export function esc(s: string): string {
   return s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -185,7 +193,7 @@ function esc(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function renderHTML(photoDataUrl: string, terms: TermGroup[]): string {
+export function renderHTML(photoDataUrl: string, terms: TermGroup[]): string {
   const sections = terms
     .map((t) => {
       if (t.error) {
@@ -270,6 +278,25 @@ function nowStamp(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
 }
 
+export function resolveOpenCommand(platform: NodeJS.Platform, path: string): string[] | null {
+  if (platform === 'darwin') return ['open', path];
+  if (platform === 'linux') return ['xdg-open', path];
+  if (platform === 'win32') return ['cmd', '/c', 'start', '', path];
+  return null;
+}
+
+function openInBrowser(path: string): void {
+  const cmd = resolveOpenCommand(process.platform, path);
+  if (!cmd) {
+    console.error(`Auto-open not supported on ${process.platform}. Open ${path} manually.`);
+    return;
+  }
+  const r = spawnSync(cmd[0], cmd.slice(1), { stdio: 'ignore' });
+  if (r.error) {
+    console.error(`Could not auto-open (${r.error.message}). Open ${path} manually.`);
+  }
+}
+
 async function main(): Promise<void> {
   const { photoPath, flags } = parseArgs(process.argv.slice(2));
   const { bytes, mime } = await loadAndValidatePhoto(photoPath);
@@ -294,11 +321,14 @@ async function main(): Promise<void> {
   try { await fs.unlink(latest); } catch { /* ok if missing */ }
   await fs.symlink(basename(outFile), latest);
 
-  spawnSync('open', [latest], { stdio: 'inherit' });
+  openInBrowser(latest);
   console.error(`Wrote ${outFile}`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Only run main() when invoked as a script — not when imported by tests.
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

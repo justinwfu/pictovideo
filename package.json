@@ -4,7 +4,8 @@
   "description": "Single-photo CLI: distill 3 search queries via Claude vision, fetch YouTube videos via youtube-pp-cli, render a dark-theme HTML page of embedded results.",
   "type": "module",
   "scripts": {
-    "find-vids": "node --env-file-if-exists=.env --experimental-strip-types --no-warnings=ExperimentalWarning find-vids.ts"
+    "find-vids": "node --env-file-if-exists=.env --experimental-strip-types --no-warnings=ExperimentalWarning find-vids.ts",
+    "test": "node --experimental-strip-types --no-warnings=ExperimentalWarning --test tests/find-vids.test.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.77",
