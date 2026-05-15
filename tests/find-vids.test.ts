@@ -24,25 +24,28 @@ const fixturesDir = join(__dirname, 'fixtures');
 
 // --- parseArgs ---------------------------------------------------------------
 
-test('parseArgs: photo only', () => {
+test('parseArgs: photo only — all flags default off', () => {
   const r = parseArgs(['photo.jpg']);
   assert.equal(r.photoPath, 'photo.jpg');
   assert.equal(r.flags.noCache, false);
   assert.equal(r.flags.showQueries, false);
+  assert.equal(r.flags.noEnrich, false);
 });
 
-test('parseArgs: photo + --no-cache + --show-queries', () => {
-  const r = parseArgs(['p.png', '--no-cache', '--show-queries']);
+test('parseArgs: photo + --no-cache + --show-queries + --no-enrich', () => {
+  const r = parseArgs(['p.png', '--no-cache', '--show-queries', '--no-enrich']);
   assert.equal(r.photoPath, 'p.png');
   assert.equal(r.flags.noCache, true);
   assert.equal(r.flags.showQueries, true);
+  assert.equal(r.flags.noEnrich, true);
 });
 
 test('parseArgs: order is insensitive', () => {
-  const r = parseArgs(['--show-queries', 'p.png', '--no-cache']);
+  const r = parseArgs(['--show-queries', 'p.png', '--no-cache', '--no-enrich']);
   assert.equal(r.photoPath, 'p.png');
   assert.equal(r.flags.noCache, true);
   assert.equal(r.flags.showQueries, true);
+  assert.equal(r.flags.noEnrich, true);
 });
 
 // --- resolveOpenCommand ------------------------------------------------------
@@ -232,4 +235,93 @@ test('renderHTML: error term renders an error block, not video cards', () => {
   ]);
   assert.ok(html.includes('Error: rate limited'), 'expected error message in output');
   assert.ok(!html.includes('data-embed='), 'expected no video cards for error-only render');
+});
+
+// --- enrichment rendering ---------------------------------------------------
+
+test('renderHTML: summary, when present, is rendered as an italic line-clamp-3 block', () => {
+  const html = renderHTML(goldenPhotoDataUrl, [
+    {
+      query: 'q',
+      results: [
+        {
+          videoId: 'sss111',
+          title: 'A video',
+          channelTitle: 'AChannel',
+          thumbnailUrl: 'https://i.ytimg.com/vi/sss111/hqdefault.jpg',
+          summary: 'Walks through dough hydration math for beginner bakers.',
+        },
+      ],
+    },
+  ]);
+  assert.ok(html.includes('italic line-clamp-3'), 'expected italic line-clamp-3 styling class on summary');
+  assert.ok(html.includes('Walks through dough hydration math for beginner bakers.'), 'expected summary text in output');
+});
+
+test('renderHTML: topComment renders likeCount + author + comment text', () => {
+  const html = renderHTML(goldenPhotoDataUrl, [
+    {
+      query: 'q',
+      results: [
+        {
+          videoId: 'ttt222',
+          title: 'A video',
+          channelTitle: 'AChannel',
+          thumbnailUrl: 'https://i.ytimg.com/vi/ttt222/hqdefault.jpg',
+          topComment: { text: 'This is the best explanation on YouTube.', author: '@viewer', likeCount: 1234 },
+        },
+      ],
+    },
+  ]);
+  assert.ok(html.includes('▲ 1234'), 'expected likeCount with arrow prefix');
+  assert.ok(html.includes('@viewer'), 'expected commenter handle');
+  assert.ok(html.includes('This is the best explanation on YouTube.'), 'expected comment text');
+});
+
+test('renderHTML: card without summary or topComment emits neither block', () => {
+  const html = renderHTML(goldenPhotoDataUrl, [
+    {
+      query: 'q',
+      results: [
+        {
+          videoId: 'uuu333',
+          title: 'A video',
+          channelTitle: 'AChannel',
+          thumbnailUrl: 'https://i.ytimg.com/vi/uuu333/hqdefault.jpg',
+        },
+      ],
+    },
+  ]);
+  assert.ok(!html.includes('italic line-clamp-3'), 'expected no summary block');
+  assert.ok(!html.includes('▲'), 'expected no top-comment block');
+});
+
+test('renderHTML: enrichment-bearing card matches checked-in golden', async () => {
+  const enrichedTerms: TermGroup[] = [
+    {
+      query: 'literal: smartphone in hand',
+      results: [
+        {
+          videoId: 'aaa111',
+          title: 'iPhone 17 vs Pixel 10: real-world comparison',
+          channelTitle: 'PhoneReviewsChannel',
+          thumbnailUrl: 'https://i.ytimg.com/vi/aaa111/hqdefault.jpg',
+          summary: 'Side-by-side video and battery test of the iPhone 17 and Pixel 10 in real-world commuting use.',
+          topComment: {
+            text: 'Best comparison I have seen — the low-light camera test alone was worth watching.',
+            author: '@buyerguide99',
+            likeCount: 842,
+          },
+        },
+      ],
+    },
+  ];
+  const html = renderHTML(goldenPhotoDataUrl, enrichedTerms);
+  const goldenPath = join(fixturesDir, 'golden-enriched.html');
+  if (process.env.UPDATE_GOLDENS === '1') {
+    await fs.writeFile(goldenPath, html);
+    return;
+  }
+  const expected = await fs.readFile(goldenPath, 'utf-8');
+  assert.equal(html, expected);
 });

@@ -42,8 +42,9 @@ Photos larger than Anthropic's 5 MB image limit are auto-downscaled with `sharp`
 
 ## Flags
 
-- `--no-cache` — bypass the local vision-response cache (useful when tweaking the system prompt)
+- `--no-cache` — bypass the local vision-response and per-video enrichment caches (useful when tweaking prompts)
 - `--show-queries` — print the 3 generated queries to stderr before fetching videos
+- `--no-enrich` — skip the transcript-summary + top-comment enrichment pass (faster, fewer API calls)
 
 ## Tests
 
@@ -57,4 +58,9 @@ Per-feature acceptance criteria (automated + manual) live in `tests/acceptance.m
 ## How caching works
 
 - Claude vision responses are cached at `.cache/vision/<sha1-of-image>.json` (24h TTL).
+- Per-video enrichments (transcript snippet, top comment, Claude-summarized one-liner) are cached at `.cache/enrich/<videoId>.json` (7d TTL).
 - YouTube responses are cached by `youtube-pp-cli` itself in its own SQLite store (6h TTL). No second cache layer here.
+
+## Enrichment (default)
+
+By default every page run also pulls a transcript and the top comment for each of the 15 picks, and asks Claude for a one-sentence "what this video actually delivers" line per video. This turns the page from "here are titles" into "here's what each video delivers + the one comment that mattered." Cost: ~30 extra cheap CLI calls + 1 Claude call per run, all cached aggressively. Pass `--no-enrich` to skip if you want the bare grid.
