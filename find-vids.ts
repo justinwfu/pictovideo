@@ -270,6 +270,22 @@ function nowStamp(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
 }
 
+function openInBrowser(path: string): void {
+  const cmd =
+    process.platform === 'darwin' ? ['open', path]
+    : process.platform === 'win32' ? ['cmd', '/c', 'start', '', path]
+    : process.platform === 'linux' ? ['xdg-open', path]
+    : null;
+  if (!cmd) {
+    console.error(`Auto-open not supported on ${process.platform}. Open ${path} manually.`);
+    return;
+  }
+  const r = spawnSync(cmd[0], cmd.slice(1), { stdio: 'ignore' });
+  if (r.error) {
+    console.error(`Could not auto-open (${r.error.message}). Open ${path} manually.`);
+  }
+}
+
 async function main(): Promise<void> {
   const { photoPath, flags } = parseArgs(process.argv.slice(2));
   const { bytes, mime } = await loadAndValidatePhoto(photoPath);
@@ -294,7 +310,7 @@ async function main(): Promise<void> {
   try { await fs.unlink(latest); } catch { /* ok if missing */ }
   await fs.symlink(basename(outFile), latest);
 
-  spawnSync('open', [latest], { stdio: 'inherit' });
+  openInBrowser(latest);
   console.error(`Wrote ${outFile}`);
 }
 
