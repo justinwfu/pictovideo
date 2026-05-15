@@ -1,0 +1,8 @@
+.env
+.env.*.local
+.cache/
+out/
+node_modules/
+*.log
+.DS_Store
+/tmp/

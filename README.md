@@ -1,0 +1,49 @@
+# pictovideo
+
+Drop in a photo. Get back a dark-themed HTML page of YouTube videos that match it from three different angles: literal, instructional, and broader-topical.
+
+![pictovideo output: photo thumbnail at top, then sections for each generated query with embedded video cards](docs/screenshot.png)
+
+```
+photo.jpg
+  -> Claude Haiku 4.5 (vision) -> 3 diverse search queries
+  -> youtube-pp-cli youtube search-bulk (single call)
+  -> Tailwind dark page with lite-embed thumbnails
+  -> opened in your browser
+```
+
+## Prereqs
+
+- Node 22.6+ (uses native `--experimental-strip-types` for TS)
+- An Anthropic API key
+- `youtube-pp-cli` on your `$PATH`, authed with a YouTube Data API v3 key
+  - https://github.com/justinwfu/youtube-pp-cli
+  - One-time setup: `youtube-pp-cli auth set-token <YOUR_YT_KEY>`
+
+## Setup
+
+```bash
+npm install
+cp .env.example .env
+# fill in ANTHROPIC_API_KEY in .env
+```
+
+## Usage
+
+```bash
+npm run find-vids -- ./path/to/photo.jpg
+```
+
+Outputs `out/<timestamp>-pictovideo.html` and opens `out/latest.html` (symlink) in your browser.
+
+Supported formats: JPEG, PNG, WEBP, GIF. HEIC is rejected (iPhone users: re-export as JPEG).
+
+## Flags
+
+- `--no-cache` — bypass the local vision-response cache (useful when tweaking the system prompt)
+- `--show-queries` — print the 3 generated queries to stderr before fetching videos
+
+## How caching works
+
+- Claude vision responses are cached at `.cache/vision/<sha1-of-image>.json` (24h TTL).
+- YouTube responses are cached by `youtube-pp-cli` itself in its own SQLite store (6h TTL). No second cache layer here.
