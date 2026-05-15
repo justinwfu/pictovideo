@@ -6,6 +6,7 @@ import { extname, basename, join } from 'node:path';
 import { anthropic } from '@ai-sdk/anthropic';
 import { generateObject } from 'ai';
 import { z } from 'zod';
+import sharp from 'sharp';
 
 const ALLOWED_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
 const EXT_TO_MIME: Record<string, string> = {
@@ -16,6 +17,11 @@ const EXT_TO_MIME: Record<string, string> = {
   '.gif': 'image/gif',
 };
 const VISION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+// Anthropic rejects images whose base64 payload exceeds 5 MB. Base64 inflates
+// raw bytes by ~33%, so the safe raw ceiling is ~3.75 MB. Subtract a small
+// buffer to leave room for the JSON envelope around the payload.
+const MAX_RAW_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4) - 8 * 1024;
 
 const SYSTEM_PROMPT = `You generate 3 YouTube search queries for a photo. Each query MUST target a different intent — the queries are not synonyms of each other.
 
@@ -63,6 +69,27 @@ function parseArgs(argv: string[]): { photoPath: string; flags: Flags } {
   return { photoPath: positional[0], flags };
 }
 
+async function downscaleToFit(bytes: Buffer, ext: string): Promise<Buffer> {
+  // GIFs may be animated; sharp would flatten them. Pass through and let the
+  // API reject if it's still too big — preserves user expectations for GIFs.
+  if (ext === '.gif') return bytes;
+
+  // .rotate() with no args applies EXIF Orientation into the pixels — without
+  // this, iPhone photos taken in portrait come out sideways once sharp strips
+  // the EXIF tag.
+  const originalKB = Math.round(bytes.length / 1024);
+  for (const width of [2048, 1536, 1024, 768]) {
+    const out = await sharp(bytes).rotate().resize({ width, withoutEnlargement: true }).toBuffer();
+    if (out.length <= MAX_RAW_BYTES) {
+      console.error(
+        `Downscaled ${originalKB} KB → ${Math.round(out.length / 1024)} KB (width ${width}px) to fit Anthropic 5 MB limit`,
+      );
+      return out;
+    }
+  }
+  return sharp(bytes).rotate().resize({ width: 768, withoutEnlargement: true }).toBuffer();
+}
+
 async function loadAndValidatePhoto(photoPath: string): Promise<{ bytes: Buffer; ext: string; mime: string }> {
   const ext = extname(photoPath).toLowerCase();
   if (!ALLOWED_EXT.has(ext)) {
@@ -76,6 +103,9 @@ async function loadAndValidatePhoto(photoPath: string): Promise<{ bytes: Buffer;
   } catch (e) {
     console.error(`Cannot read photo: ${(e as Error).message}`);
     process.exit(1);
+  }
+  if (bytes.length > MAX_RAW_BYTES) {
+    bytes = await downscaleToFit(bytes, ext);
   }
   return { bytes, ext, mime: EXT_TO_MIME[ext] };
 }
