@@ -104,8 +104,15 @@ async function loadAndValidatePhoto(photoPath: string): Promise<{ bytes: Buffer;
     console.error(`Cannot read photo: ${(e as Error).message}`);
     process.exit(1);
   }
-  if (bytes.length > MAX_RAW_BYTES) {
+  if (ext === '.gif') {
+    // GIFs may be animated; pass through so we don't flatten frames.
+  } else if (bytes.length > MAX_RAW_BYTES) {
     bytes = await downscaleToFit(bytes, ext);
+  } else {
+    // Bake EXIF Orientation into pixels for inputs that bypass downscale —
+    // otherwise portrait iPhone JPEGs under the size limit arrive sideways
+    // if the consumer doesn't honor EXIF.
+    bytes = await sharp(bytes).rotate().toBuffer();
   }
   return { bytes, ext, mime: EXT_TO_MIME[ext] };
 }
