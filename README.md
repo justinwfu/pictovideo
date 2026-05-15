@@ -45,6 +45,15 @@ Photos larger than Anthropic's 5 MB image limit are auto-downscaled with `sharp`
 - `--no-cache` — bypass the local vision-response cache (useful when tweaking the system prompt)
 - `--show-queries` — print the 3 generated queries to stderr before fetching videos
 
+## Tests
+
+```bash
+npm test                  # 17 node:test cases, ~1s
+UPDATE_GOLDENS=1 npm test # regenerate tests/fixtures/golden.html after intentional render changes
+```
+
+Per-feature acceptance criteria (automated + manual) live in `tests/acceptance.md`.
+
 ## How caching works
 
 - Claude vision responses are cached at `.cache/vision/<sha1-of-image>.json` (24h TTL).
